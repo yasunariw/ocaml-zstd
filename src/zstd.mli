@@ -53,3 +53,24 @@ val compress_stream_flush :
     semantics. *)
 val compress_stream_close :
   compress_stream -> writer:(bytes -> int -> int -> unit) -> unit
+
+(** {2 Streaming Decompression} *)
+
+type decompress_stream
+
+val decompress_stream_create : ?dict:string -> unit -> decompress_stream
+
+val decompress_stream_is_closed : decompress_stream -> bool
+
+(** [decompress_stream_read stream ~reader buf off len] decompresses up to [len]
+    bytes into [buf] starting at [off]. Calls [reader] to obtain compressed input.
+    Returns 0 at end of stream.
+
+    If [reader] raises an exception, the stream enters an undefined state and
+    should be closed without further use. *)
+val decompress_stream_read :
+  decompress_stream -> reader:(bytes -> int -> int -> int) ->
+  bytes -> int -> int -> int
+
+(** [decompress_stream_close stream] frees the context. Idempotent. *)
+val decompress_stream_close : decompress_stream -> unit

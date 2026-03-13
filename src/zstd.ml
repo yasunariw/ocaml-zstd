@@ -182,3 +182,131 @@ let compress_stream_close s ~writer =
         end)
       (fun () -> drain_output s ~writer T.e_end)
   end
+
+(* Streaming decompression *)
+
+type decompress_stream = {
+  dctx: [`DCtx] Ctypes.structure Ctypes.ptr;
+  in_buf: bigstring;
+  in_size: int;
+  in_bytes: bytes;
+  out_buf: bigstring;
+  out_size: int;
+  zstd_in: [`InBuffer] Ctypes.structure;
+  zstd_out: [`OutBuffer] Ctypes.structure;
+  mutable in_filled: int;
+  mutable in_consumed: int;
+  mutable out_pos: int;
+  mutable out_avail: int;
+  mutable eof: bool;
+  mutable last_ret: int;
+  mutable closed: bool;
+  mutable freed: bool;
+}
+
+let decompress_stream_create ?dict () =
+  let open Ctypes in
+  let dctx = F.create_dctx () in
+  if is_null dctx then raise (Error "ZSTD_createDCtx failed");
+  try
+    (match dict with
+     | Some d -> check (F.dctx_load_dictionary dctx d (Size_t.of_int (String.length d)))
+     | None -> ());
+    let in_size = dstream_in_size () in
+    let out_size = dstream_out_size () in
+    let in_buf = bigstring_create in_size in
+    let in_bytes = Bytes.create in_size in
+    let out_buf = bigstring_create out_size in
+    let zstd_in = make F.in_buffer in
+    let zstd_out = make F.out_buffer in
+    setf zstd_in F.in_buffer_src (to_voidp (bigstring_start in_buf));
+    setf zstd_out F.out_buffer_dst (to_voidp (bigstring_start out_buf));
+    let s = { dctx; in_buf; in_size; in_bytes; out_buf; out_size;
+              zstd_in; zstd_out; in_filled = 0; in_consumed = 0;
+              out_pos = 0; out_avail = 0;
+              eof = false; last_ret = 0; closed = false; freed = false } in
+    Gc.finalise (fun s ->
+      if not s.freed then begin
+        s.freed <- true;
+        ignore (F.free_dctx s.dctx)
+      end) s;
+    s
+  with exn ->
+    ignore (F.free_dctx dctx);
+    raise exn
+
+let decompress_stream_is_closed s = s.closed
+
+let decompress_stream_read s ~reader buf off len =
+  if s.closed then raise (Error "stream is closed");
+  if off < 0 || len < 0 || off > Bytes.length buf - len then
+    invalid_arg "Zstd.decompress_stream_read";
+  if len = 0 then 0
+  else begin
+    let open Ctypes in
+    let total = ref 0 in
+    let continue = ref true in
+    while !total < len && !continue do
+      (* drain leftover from internal buffer *)
+      if s.out_avail > 0 then begin
+        let n = min s.out_avail (len - !total) in
+        Bigstringaf.blit_to_bytes s.out_buf ~src_off:s.out_pos buf ~dst_off:(off + !total) ~len:n;
+        s.out_pos <- s.out_pos + n;
+        s.out_avail <- s.out_avail - n;
+        total := !total + n
+      end else begin
+        (* refill input buffer if exhausted *)
+        if s.in_consumed >= s.in_filled && not s.eof then begin
+          let n = reader s.in_bytes 0 s.in_size in
+          if n < 0 || n > s.in_size then
+            invalid_arg "Zstd.decompress_stream_read: reader returned invalid length";
+          if n = 0 then
+            s.eof <- true
+          else begin
+            Bigstringaf.blit_from_bytes s.in_bytes ~src_off:0 s.in_buf ~dst_off:0 ~len:n;
+            s.in_filled <- n;
+            s.in_consumed <- 0
+          end
+        end;
+        (* detect clean EOF vs truncation *)
+        if s.in_consumed >= s.in_filled && s.eof then begin
+          if s.last_ret <> 0 then
+            raise (Error "truncated compressed data");
+          continue := false
+        end else begin
+          (* decompress one step with full output buffer *)
+          let consumed_before = s.in_consumed in
+          setf s.zstd_in F.in_buffer_size (Size_t.of_int s.in_filled);
+          setf s.zstd_in F.in_buffer_pos (Size_t.of_int s.in_consumed);
+          setf s.zstd_out F.out_buffer_size (Size_t.of_int s.out_size);
+          setf s.zstd_out F.out_buffer_pos (Size_t.of_int 0);
+          let ret = F.decompress_stream s.dctx (addr s.zstd_out) (addr s.zstd_in) in
+          check ret;
+          s.in_consumed <- Size_t.to_int (getf s.zstd_in F.in_buffer_pos);
+          let produced = Size_t.to_int (getf s.zstd_out F.out_buffer_pos) in
+          s.last_ret <- Size_t.to_int ret;
+          if produced > 0 then begin
+            let n = min produced (len - !total) in
+            Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 buf ~dst_off:(off + !total) ~len:n;
+            total := !total + n;
+            if produced > n then begin
+              s.out_pos <- n;
+              s.out_avail <- produced - n
+            end
+          end else if s.in_consumed = consumed_before && s.last_ret <> 0 then
+            raise (Error "decompression made no progress")
+        end
+      end
+    done;
+    !total
+  end
+
+let decompress_stream_close s =
+  if s.closed then ()
+  else begin
+    s.closed <- true;
+    if not s.freed then begin
+      s.freed <- true;
+      ignore (F.free_dctx s.dctx)
+    end
+  end
