@@ -310,3 +310,29 @@ let decompress_stream_close s =
       ignore (F.free_dctx s.dctx)
     end
   end
+
+(* High-level channel interface *)
+
+type out_channel = { stream: compress_stream; writer: bytes -> int -> int -> unit }
+type in_channel = { dstream: decompress_stream; reader: bytes -> int -> int -> int }
+
+let open_out ?level ?dict writer =
+  { stream = compress_stream_create ?level ?dict (); writer }
+
+let output oc buf off len =
+  compress_stream_write oc.stream ~writer:oc.writer buf off len
+
+let flush oc =
+  compress_stream_flush oc.stream ~writer:oc.writer
+
+let close_out oc =
+  compress_stream_close oc.stream ~writer:oc.writer
+
+let open_in ?dict reader =
+  { dstream = decompress_stream_create ?dict (); reader }
+
+let input ic buf off len =
+  decompress_stream_read ic.dstream ~reader:ic.reader buf off len
+
+let close_in ic =
+  decompress_stream_close ic.dstream

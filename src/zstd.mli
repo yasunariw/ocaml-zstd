@@ -74,3 +74,17 @@ val decompress_stream_read :
 
 (** [decompress_stream_close stream] frees the context. Idempotent. *)
 val decompress_stream_close : decompress_stream -> unit
+
+(** {2 Channel Interface} *)
+
+type out_channel
+type in_channel
+
+val open_out : ?level:int -> ?dict:string -> (bytes -> int -> int -> unit) -> out_channel
+val output : out_channel -> bytes -> int -> int -> unit
+val flush : out_channel -> unit
+val close_out : out_channel -> unit
+
+val open_in : ?dict:string -> (bytes -> int -> int -> int) -> in_channel
+val input : in_channel -> bytes -> int -> int -> int
+val close_in : in_channel -> unit
