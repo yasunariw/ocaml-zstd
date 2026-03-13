@@ -60,3 +60,125 @@ let get_decompressed_size s =
     raise (Error "content size unknown")
   else
     Unsigned.ULLong.to_int r
+
+(* Streaming API *)
+
+type bigstring = Bigstringaf.t
+
+let bigstring_create n = Bigstringaf.create n
+
+let bigstring_start ba = Ctypes.bigarray_start Ctypes.array1 ba
+
+let cstream_in_size () = Size_t.to_int (F.cstream_in_size ())
+let cstream_out_size () = Size_t.to_int (F.cstream_out_size ())
+let dstream_in_size () = Size_t.to_int (F.dstream_in_size ())
+let dstream_out_size () = Size_t.to_int (F.dstream_out_size ())
+
+type compress_stream = {
+  cctx: [`CCtx] Ctypes.structure Ctypes.ptr;
+  in_buf: bigstring;
+  in_size: int;
+  out_buf: bigstring;
+  out_size: int;
+  out_bytes: bytes;
+  zstd_in: [`InBuffer] Ctypes.structure;
+  zstd_out: [`OutBuffer] Ctypes.structure;
+  mutable closed: bool;
+  mutable freed: bool;
+}
+
+let compress_stream_create ?level ?dict () =
+  let open Ctypes in
+  let cctx = F.create_cctx () in
+  if is_null cctx then raise (Error "ZSTD_createCCtx failed");
+  try
+    (match level with
+     | Some l -> check (F.cctx_set_parameter cctx T.c_compressionLevel l)
+     | None -> ());
+    (match dict with
+     | Some d -> check (F.cctx_load_dictionary cctx d (Size_t.of_int (String.length d)))
+     | None -> ());
+    let in_size = cstream_in_size () in
+    let out_size = cstream_out_size () in
+    let in_buf = bigstring_create in_size in
+    let out_buf = bigstring_create out_size in
+    let out_bytes = Bytes.create out_size in
+    let zstd_in = make F.in_buffer in
+    let zstd_out = make F.out_buffer in
+    setf zstd_in F.in_buffer_src (to_voidp (bigstring_start in_buf));
+    setf zstd_out F.out_buffer_dst (to_voidp (bigstring_start out_buf));
+    let s = { cctx; in_buf; in_size; out_buf; out_size; out_bytes;
+              zstd_in; zstd_out; closed = false; freed = false } in
+    Gc.finalise (fun s ->
+      if not s.freed then begin
+        s.freed <- true;
+        ignore (F.free_cctx s.cctx)
+      end) s;
+    s
+  with exn ->
+    ignore (F.free_cctx cctx);
+    raise exn
+
+let compress_stream_is_closed s = s.closed
+
+let drain_output s ~writer directive =
+  let open Ctypes in
+  setf s.zstd_in F.in_buffer_size (Size_t.of_int 0);
+  setf s.zstd_in F.in_buffer_pos (Size_t.of_int 0);
+  let rec loop () =
+    setf s.zstd_out F.out_buffer_size (Size_t.of_int s.out_size);
+    setf s.zstd_out F.out_buffer_pos (Size_t.of_int 0);
+    let remaining = F.compress_stream2 s.cctx (addr s.zstd_out) (addr s.zstd_in) directive in
+    check remaining;
+    let out_pos = Size_t.to_int (getf s.zstd_out F.out_buffer_pos) in
+    if out_pos > 0 then begin
+      Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
+      writer s.out_bytes 0 out_pos
+    end;
+    if Size_t.to_int remaining > 0 then loop ()
+  in
+  loop ()
+
+let compress_stream_write s ~writer buf off len =
+  if s.closed then raise (Error "stream is closed");
+  if off < 0 || len < 0 || off > Bytes.length buf - len then
+    invalid_arg "Zstd.compress_stream_write";
+  if len = 0 then ()
+  else begin
+    let open Ctypes in
+    let pos = ref 0 in
+    while !pos < len do
+      let chunk = min s.in_size (len - !pos) in
+      Bigstringaf.blit_from_bytes buf ~src_off:(off + !pos) s.in_buf ~dst_off:0 ~len:chunk;
+      setf s.zstd_in F.in_buffer_size (Size_t.of_int chunk);
+      setf s.zstd_in F.in_buffer_pos (Size_t.of_int 0);
+      while Size_t.to_int (getf s.zstd_in F.in_buffer_pos) < chunk do
+        setf s.zstd_out F.out_buffer_size (Size_t.of_int s.out_size);
+        setf s.zstd_out F.out_buffer_pos (Size_t.of_int 0);
+        check (F.compress_stream2 s.cctx (addr s.zstd_out) (addr s.zstd_in) T.e_continue);
+        let out_pos = Size_t.to_int (getf s.zstd_out F.out_buffer_pos) in
+        if out_pos > 0 then begin
+          Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
+          writer s.out_bytes 0 out_pos
+        end
+      done;
+      pos := !pos + chunk
+    done
+  end
+
+let compress_stream_flush s ~writer =
+  if s.closed then raise (Error "stream is closed");
+  drain_output s ~writer T.e_flush
+
+let compress_stream_close s ~writer =
+  if s.closed then ()
+  else begin
+    s.closed <- true;
+    Fun.protect
+      ~finally:(fun () ->
+        if not s.freed then begin
+          s.freed <- true;
+          ignore (F.free_cctx s.cctx)
+        end)
+      (fun () -> drain_output s ~writer T.e_end)
+  end

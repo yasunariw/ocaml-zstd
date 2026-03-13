@@ -1,4 +1,4 @@
 (library
  (public_name zstd)
  (modules zstd)
- (libraries ctypes.stubs integers zstd.stubs))
+ (libraries bigstringaf ctypes.stubs integers zstd.stubs))
