@@ -313,14 +313,18 @@ let decompress_stream_close s =
 
 (* High-level channel interface *)
 
-type out_channel = { stream: compress_stream; writer: bytes -> int -> int -> unit }
-type in_channel = { dstream: decompress_stream; reader: bytes -> int -> int -> int }
+type out_channel = { stream: compress_stream; writer: bytes -> int -> int -> unit; char_buf: bytes }
+type in_channel = { dstream: decompress_stream; reader: bytes -> int -> int -> int; char_buf: bytes }
 
 let open_out ?level ?dict writer =
-  { stream = compress_stream_create ?level ?dict (); writer }
+  { stream = compress_stream_create ?level ?dict (); writer; char_buf = Bytes.create 1 }
 
 let output oc buf off len =
   compress_stream_write oc.stream ~writer:oc.writer buf off len
+
+let output_char (oc : out_channel) c =
+  Bytes.unsafe_set oc.char_buf 0 c;
+  output oc oc.char_buf 0 1
 
 let flush oc =
   compress_stream_flush oc.stream ~writer:oc.writer
@@ -329,10 +333,15 @@ let close_out oc =
   compress_stream_close oc.stream ~writer:oc.writer
 
 let open_in ?dict reader =
-  { dstream = decompress_stream_create ?dict (); reader }
+  { dstream = decompress_stream_create ?dict (); reader; char_buf = Bytes.create 1 }
 
 let input ic buf off len =
   decompress_stream_read ic.dstream ~reader:ic.reader buf off len
+
+let input_char ic =
+  let n = input ic ic.char_buf 0 1 in
+  if n = 0 then raise End_of_file
+  else Bytes.unsafe_get ic.char_buf 0
 
 let close_in ic =
   decompress_stream_close ic.dstream
