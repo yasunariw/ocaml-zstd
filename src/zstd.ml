@@ -72,6 +72,14 @@ let bigstring_create n = Bigstringaf.create n
 
 let bigstring_start ba = Ctypes.bigarray_start Ctypes.array1 ba
 
+let make_zstd_buffers in_buf out_buf =
+  let open Ctypes in
+  let zstd_in = make F.in_buffer in
+  let zstd_out = make F.out_buffer in
+  setf zstd_in F.in_buffer_src (to_voidp (bigstring_start in_buf));
+  setf zstd_out F.out_buffer_dst (to_voidp (bigstring_start out_buf));
+  (zstd_in, zstd_out)
+
 let cstream_in_size () = Size_t.to_int (F.cstream_in_size ())
 let cstream_out_size () = Size_t.to_int (F.cstream_out_size ())
 let dstream_in_size () = Size_t.to_int (F.dstream_in_size ())
@@ -106,10 +114,7 @@ let compress_stream_create ?level ?dict () =
     let in_buf = bigstring_create in_size in
     let out_buf = bigstring_create out_size in
     let out_bytes = Bytes.create out_size in
-    let zstd_in = make F.in_buffer in
-    let zstd_out = make F.out_buffer in
-    setf zstd_in F.in_buffer_src (to_voidp (bigstring_start in_buf));
-    setf zstd_out F.out_buffer_dst (to_voidp (bigstring_start out_buf));
+    let zstd_in, zstd_out = make_zstd_buffers in_buf out_buf in
     let s = { cctx; in_buf; in_size; out_buf; out_size; out_bytes;
               zstd_in; zstd_out; closed = false; freed = false } in
     Gc.finalise (fun s ->
@@ -124,21 +129,25 @@ let compress_stream_create ?level ?dict () =
 
 let compress_stream_is_closed s = s.closed
 
-let drain_output s ~writer directive =
+let compress_step s ~writer directive =
   let open Ctypes in
+  seti s.zstd_out F.out_buffer_size s.out_size;
+  seti s.zstd_out F.out_buffer_pos 0;
+  let remaining = F.compress_stream2 s.cctx (addr s.zstd_out) (addr s.zstd_in) directive in
+  check remaining;
+  let out_pos = geti s.zstd_out F.out_buffer_pos in
+  if out_pos > 0 then begin
+    Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
+    writer s.out_bytes 0 out_pos
+  end;
+  Size_t.to_int remaining
+
+let drain_output s ~writer directive =
   seti s.zstd_in F.in_buffer_size 0;
   seti s.zstd_in F.in_buffer_pos 0;
   let rec loop () =
-    seti s.zstd_out F.out_buffer_size s.out_size;
-    seti s.zstd_out F.out_buffer_pos 0;
-    let remaining = F.compress_stream2 s.cctx (addr s.zstd_out) (addr s.zstd_in) directive in
-    check remaining;
-    let out_pos = geti s.zstd_out F.out_buffer_pos in
-    if out_pos > 0 then begin
-      Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
-      writer s.out_bytes 0 out_pos
-    end;
-    if Size_t.to_int remaining > 0 then loop ()
+    let remaining = compress_step s ~writer directive in
+    if remaining > 0 then loop ()
   in
   loop ()
 
@@ -148,7 +157,6 @@ let compress_stream_write s ~writer buf off len =
     invalid_arg "Zstd.compress_stream_write";
   if len = 0 then ()
   else begin
-    let open Ctypes in
     let pos = ref 0 in
     while !pos < len do
       let chunk = min s.in_size (len - !pos) in
@@ -156,14 +164,8 @@ let compress_stream_write s ~writer buf off len =
       seti s.zstd_in F.in_buffer_size chunk;
       seti s.zstd_in F.in_buffer_pos 0;
       while geti s.zstd_in F.in_buffer_pos < chunk do
-        seti s.zstd_out F.out_buffer_size s.out_size;
-        seti s.zstd_out F.out_buffer_pos 0;
-        check (F.compress_stream2 s.cctx (addr s.zstd_out) (addr s.zstd_in) T.e_continue);
-        let out_pos = geti s.zstd_out F.out_buffer_pos in
-        if out_pos > 0 then begin
-          Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
-          writer s.out_bytes 0 out_pos
-        end
+        let (_remaining : int) = compress_step s ~writer T.e_continue in
+        ()
       done;
       pos := !pos + chunk
     done
@@ -220,10 +222,7 @@ let decompress_stream_create ?dict () =
     let in_buf = bigstring_create in_size in
     let in_bytes = Bytes.create in_size in
     let out_buf = bigstring_create out_size in
-    let zstd_in = make F.in_buffer in
-    let zstd_out = make F.out_buffer in
-    setf zstd_in F.in_buffer_src (to_voidp (bigstring_start in_buf));
-    setf zstd_out F.out_buffer_dst (to_voidp (bigstring_start out_buf));
+    let zstd_in, zstd_out = make_zstd_buffers in_buf out_buf in
     let s = { dctx; in_buf; in_size; in_bytes; out_buf; out_size;
               zstd_in; zstd_out; in_filled = 0; in_consumed = 0;
               out_pos = 0; out_avail = 0;
