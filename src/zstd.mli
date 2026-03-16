@@ -19,58 +19,58 @@ val get_decompressed_size : string -> int
 
 (** {1 Streaming Interface} *)
 
-val cstream_in_size : unit -> int
-val cstream_out_size : unit -> int
-val dstream_in_size : unit -> int
-val dstream_out_size : unit -> int
-
 (** {2 Streaming Compression} *)
 
-type compress_stream
+module Compress_stream : sig
+  type t
 
-val compress_stream_create : ?level:int -> ?dict:string -> unit -> compress_stream
+  val in_size : unit -> int
+  val out_size : unit -> int
 
-val compress_stream_is_closed : compress_stream -> bool
+  val create : ?level:int -> ?dict:string -> unit -> t
 
-(** [compress_stream_write stream ~writer buf off len] compresses [len] bytes
-    from [buf] starting at [off]. Compressed output is passed to [writer].
+  val is_closed : t -> bool
 
-    The [bytes] buffer passed to [writer] is reused across calls; the contents
-    are only valid for the duration of the callback. If [writer] raises an
-    exception, the stream is automatically closed and the exception is
-    re-raised. *)
-val compress_stream_write :
-  compress_stream -> writer:(bytes -> int -> int -> unit) ->
-  bytes -> int -> int -> unit
+  (** [write stream ~writer buf off len] compresses [len] bytes from [buf]
+      starting at [off]. Compressed output is passed to [writer].
 
-(** [compress_stream_flush stream ~writer] flushes buffered data.
-    See {!compress_stream_write} for [writer] buffer and exception semantics. *)
-val compress_stream_flush :
-  compress_stream -> writer:(bytes -> int -> int -> unit) -> unit
+      The [bytes] buffer passed to [writer] is reused across calls; the contents
+      are only valid for the duration of the callback. If [writer] raises an
+      exception, the stream is automatically closed and the exception is
+      re-raised. *)
+  val write : t -> writer:(bytes -> int -> int -> unit) ->
+    bytes -> int -> int -> unit
 
-(** [compress_stream_close stream ~writer] ends the frame and frees the context.
-    Idempotent. See {!compress_stream_write} for [writer] buffer and exception
-    semantics. *)
-val compress_stream_close :
-  compress_stream -> writer:(bytes -> int -> int -> unit) -> unit
+  (** [flush stream ~writer] flushes buffered data.
+      See {!write} for [writer] buffer and exception semantics. *)
+  val flush : t -> writer:(bytes -> int -> int -> unit) -> unit
+
+  (** [close stream ~writer] ends the frame and frees the context.
+      Idempotent. See {!write} for [writer] buffer and exception semantics. *)
+  val close : t -> writer:(bytes -> int -> int -> unit) -> unit
+end
 
 (** {2 Streaming Decompression} *)
 
-type decompress_stream
+module Decompress_stream : sig
+  type t
 
-val decompress_stream_create : ?dict:string -> unit -> decompress_stream
+  val in_size : unit -> int
+  val out_size : unit -> int
 
-val decompress_stream_is_closed : decompress_stream -> bool
+  val create : ?dict:string -> unit -> t
 
-(** [decompress_stream_read stream ~reader buf off len] decompresses up to [len]
-    bytes into [buf] starting at [off]. Calls [reader] to obtain compressed input.
-    Returns 0 at end of stream.
+  val is_closed : t -> bool
 
-    If [reader] raises an exception, the stream is automatically closed and
-    the exception is re-raised. *)
-val decompress_stream_read :
-  decompress_stream -> reader:(bytes -> int -> int -> int) ->
-  bytes -> int -> int -> int
+  (** [read stream ~reader buf off len] decompresses up to [len] bytes into
+      [buf] starting at [off]. Calls [reader] to obtain compressed input.
+      Returns 0 at end of stream.
 
-(** [decompress_stream_close stream] frees the context. Idempotent. *)
-val decompress_stream_close : decompress_stream -> unit
+      If [reader] raises an exception, the stream is automatically closed and
+      the exception is re-raised. *)
+  val read : t -> reader:(bytes -> int -> int -> int) ->
+    bytes -> int -> int -> int
+
+  (** [close stream] frees the context. Idempotent. *)
+  val close : t -> unit
+end

@@ -16,12 +16,12 @@ let test (name,src) =
 let stream_compress ?level ?dict src =
   let buf = Buffer.create 256 in
   let writer b off len = Buffer.add_subbytes buf b off len in
-  let s = Zstd.compress_stream_create ?level ?dict () in
-  Zstd.compress_stream_write s ~writer (Bytes.of_string src) 0 (String.length src);
-  Zstd.compress_stream_close s ~writer;
+  let s = Zstd.Compress_stream.create ?level ?dict () in
+  Zstd.Compress_stream.write s ~writer (Bytes.of_string src) 0 (String.length src);
+  Zstd.Compress_stream.close s ~writer;
   Buffer.contents buf
 
-let stream_decompress ?dict ?(buf_size=Zstd.dstream_out_size ()) src =
+let stream_decompress ?dict ?(buf_size=Zstd.Decompress_stream.out_size ()) src =
   let pos = ref 0 in
   let reader b off len =
     let available = String.length src - !pos in
@@ -30,18 +30,18 @@ let stream_decompress ?dict ?(buf_size=Zstd.dstream_out_size ()) src =
     pos := !pos + n;
     n
   in
-  let s = Zstd.decompress_stream_create ?dict () in
+  let s = Zstd.Decompress_stream.create ?dict () in
   let out = Buffer.create 256 in
   let tmp = Bytes.create buf_size in
   let rec loop () =
-    let n = Zstd.decompress_stream_read s ~reader tmp 0 (Bytes.length tmp) in
+    let n = Zstd.Decompress_stream.read s ~reader tmp 0 (Bytes.length tmp) in
     if n > 0 then begin
       Buffer.add_subbytes out tmp 0 n;
       loop ()
     end
   in
   loop ();
-  Zstd.decompress_stream_close s;
+  Zstd.Decompress_stream.close s;
   Buffer.contents out
 
 let test_streaming () =
@@ -85,12 +85,12 @@ let test_streaming () =
   (* 4. Incremental writes *)
   let () =
     let buf, writer = buf_writer () in
-    let s = Zstd.compress_stream_create ~level:1 () in
+    let s = Zstd.Compress_stream.create ~level:1 () in
     let src = Bytes.of_string data in
     for i = 0 to String.length data - 1 do
-      Zstd.compress_stream_write s ~writer src i 1
+      Zstd.Compress_stream.write s ~writer src i 1
     done;
-    Zstd.compress_stream_close s ~writer;
+    Zstd.Compress_stream.close s ~writer;
     let decompressed = stream_decompress (Buffer.contents buf) in
     assert (decompressed = data);
     printf "  4. incremental writes: OK\n"
@@ -103,11 +103,11 @@ let test_streaming () =
   (* 6. Flush produces output before close; full round-trip with flush+close *)
   let () =
     let buf, writer = buf_writer () in
-    let s = Zstd.compress_stream_create ~level:1 () in
-    Zstd.compress_stream_write s ~writer (Bytes.of_string data) 0 (String.length data);
-    Zstd.compress_stream_flush s ~writer;
+    let s = Zstd.Compress_stream.create ~level:1 () in
+    Zstd.Compress_stream.write s ~writer (Bytes.of_string data) 0 (String.length data);
+    Zstd.Compress_stream.flush s ~writer;
     assert (Buffer.length buf > 0);
-    Zstd.compress_stream_close s ~writer;
+    Zstd.Compress_stream.close s ~writer;
     let decompressed = stream_decompress (Buffer.contents buf) in
     assert (decompressed = data);
     printf "  6. flush: OK\n"
@@ -154,24 +154,24 @@ let test_streaming () =
   in
   (* 11. Input validation *)
   let () =
-    let in_size = Zstd.dstream_in_size () in
+    let in_size = Zstd.Decompress_stream.in_size () in
     let tmp = Bytes.create 64 in
     expect_exn (fun () ->
-      let ds = Zstd.decompress_stream_create () in
-      Fun.protect ~finally:(fun () -> Zstd.decompress_stream_close ds) (fun () ->
-        Zstd.decompress_stream_read ds ~reader:(fun _ _ _ -> -1) tmp 0 64));
+      let ds = Zstd.Decompress_stream.create () in
+      Fun.protect ~finally:(fun () -> Zstd.Decompress_stream.close ds) (fun () ->
+        Zstd.Decompress_stream.read ds ~reader:(fun _ _ _ -> -1) tmp 0 64));
     expect_exn (fun () ->
-      let ds = Zstd.decompress_stream_create () in
-      Fun.protect ~finally:(fun () -> Zstd.decompress_stream_close ds) (fun () ->
-        Zstd.decompress_stream_read ds ~reader:(fun _ _ _ -> in_size + 1) tmp 0 64));
+      let ds = Zstd.Decompress_stream.create () in
+      Fun.protect ~finally:(fun () -> Zstd.Decompress_stream.close ds) (fun () ->
+        Zstd.Decompress_stream.read ds ~reader:(fun _ _ _ -> in_size + 1) tmp 0 64));
     expect_exn (fun () ->
-      let ds = Zstd.decompress_stream_create () in
-      Fun.protect ~finally:(fun () -> Zstd.decompress_stream_close ds) (fun () ->
-        Zstd.decompress_stream_read ds ~reader:(fun _ _ _ -> 0) tmp max_int 1));
+      let ds = Zstd.Decompress_stream.create () in
+      Fun.protect ~finally:(fun () -> Zstd.Decompress_stream.close ds) (fun () ->
+        Zstd.Decompress_stream.read ds ~reader:(fun _ _ _ -> 0) tmp max_int 1));
     expect_exn (fun () ->
-      let s = Zstd.compress_stream_create () in
-      Fun.protect ~finally:(fun () -> Zstd.compress_stream_close s ~writer:(fun _ _ _ -> ())) (fun () ->
-        Zstd.compress_stream_write s ~writer:(fun _ _ _ -> ()) tmp max_int 1));
+      let s = Zstd.Compress_stream.create () in
+      Fun.protect ~finally:(fun () -> Zstd.Compress_stream.close s ~writer:(fun _ _ _ -> ())) (fun () ->
+        Zstd.Compress_stream.write s ~writer:(fun _ _ _ -> ()) tmp max_int 1));
     printf " 11. input validation: OK\n"
   in
   (* 12. Byte-at-a-time decompression (exercises internal buffering) *)
