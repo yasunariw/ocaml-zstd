@@ -119,6 +119,7 @@ let compress_stream_create ?level ?dict () =
               zstd_in; zstd_out; closed = false; freed = false } in
     Gc.finalise (fun s ->
       if not s.freed then begin
+        prerr_endline "W: Zstd compress stream was not explicitly closed";
         s.freed <- true;
         ignore (F.free_cctx s.cctx)
       end) s;
@@ -240,6 +241,7 @@ let decompress_stream_create ?dict () =
               eof = false; last_ret = 0; closed = false; freed = false } in
     Gc.finalise (fun s ->
       if not s.freed then begin
+        prerr_endline "W: Zstd decompress stream was not explicitly closed";
         s.freed <- true;
         ignore (F.free_dctx s.dctx)
       end) s;
