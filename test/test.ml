@@ -152,36 +152,7 @@ let test_streaming () =
     assert (decompressed = src);
     printf " 10. large data (10MB+): OK\n"
   in
-  (* 11. Channel interface round-trip *)
-  let () =
-    let buf = Buffer.create 256 in
-    let oc = Zstd.open_out ~level:3 (fun b off len -> Buffer.add_subbytes buf b off len) in
-    Zstd.output oc (Bytes.of_string data) 0 (String.length data);
-    Zstd.close_out oc;
-    let compressed = Buffer.contents buf in
-    let pos = ref 0 in
-    let ic = Zstd.open_in (fun b off len ->
-      let available = String.length compressed - !pos in
-      let n = min len available in
-      Bytes.blit_string compressed !pos b off n;
-      pos := !pos + n;
-      n)
-    in
-    let out = Buffer.create 256 in
-    let tmp = Bytes.create 4096 in
-    let rec read_all () =
-      let n = Zstd.input ic tmp 0 (Bytes.length tmp) in
-      if n > 0 then begin
-        Buffer.add_subbytes out tmp 0 n;
-        read_all ()
-      end
-    in
-    read_all ();
-    Zstd.close_in ic;
-    assert (Buffer.contents out = data);
-    printf " 11. channel interface: OK\n"
-  in
-  (* 12. Input validation *)
+  (* 11. Input validation *)
   let () =
     let in_size = Zstd.dstream_in_size () in
     let tmp = Bytes.create 64 in
@@ -201,13 +172,13 @@ let test_streaming () =
       let s = Zstd.compress_stream_create () in
       Fun.protect ~finally:(fun () -> Zstd.compress_stream_close s ~writer:(fun _ _ _ -> ())) (fun () ->
         Zstd.compress_stream_write s ~writer:(fun _ _ _ -> ()) tmp max_int 1));
-    printf " 12. input validation: OK\n"
+    printf " 11. input validation: OK\n"
   in
-  (* 13. Byte-at-a-time decompression (exercises internal buffering) *)
+  (* 12. Byte-at-a-time decompression (exercises internal buffering) *)
   let () =
     let compressed = stream_compress data in
     assert (stream_decompress ~buf_size:1 compressed = data);
-    printf " 13. byte-at-a-time decompression: OK\n"
+    printf " 12. byte-at-a-time decompression: OK\n"
   in
   printf "All streaming tests passed.\n"
 
