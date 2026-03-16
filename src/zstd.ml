@@ -63,6 +63,9 @@ let get_decompressed_size s =
 
 (* Streaming API *)
 
+let seti s f i = Ctypes.setf s f (Size_t.of_int i)
+let geti s f = Size_t.to_int (Ctypes.getf s f)
+
 type bigstring = Bigstringaf.t
 
 let bigstring_create n = Bigstringaf.create n
@@ -123,14 +126,14 @@ let compress_stream_is_closed s = s.closed
 
 let drain_output s ~writer directive =
   let open Ctypes in
-  setf s.zstd_in F.in_buffer_size (Size_t.of_int 0);
-  setf s.zstd_in F.in_buffer_pos (Size_t.of_int 0);
+  seti s.zstd_in F.in_buffer_size 0;
+  seti s.zstd_in F.in_buffer_pos 0;
   let rec loop () =
-    setf s.zstd_out F.out_buffer_size (Size_t.of_int s.out_size);
-    setf s.zstd_out F.out_buffer_pos (Size_t.of_int 0);
+    seti s.zstd_out F.out_buffer_size s.out_size;
+    seti s.zstd_out F.out_buffer_pos 0;
     let remaining = F.compress_stream2 s.cctx (addr s.zstd_out) (addr s.zstd_in) directive in
     check remaining;
-    let out_pos = Size_t.to_int (getf s.zstd_out F.out_buffer_pos) in
+    let out_pos = geti s.zstd_out F.out_buffer_pos in
     if out_pos > 0 then begin
       Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
       writer s.out_bytes 0 out_pos
@@ -150,13 +153,13 @@ let compress_stream_write s ~writer buf off len =
     while !pos < len do
       let chunk = min s.in_size (len - !pos) in
       Bigstringaf.blit_from_bytes buf ~src_off:(off + !pos) s.in_buf ~dst_off:0 ~len:chunk;
-      setf s.zstd_in F.in_buffer_size (Size_t.of_int chunk);
-      setf s.zstd_in F.in_buffer_pos (Size_t.of_int 0);
-      while Size_t.to_int (getf s.zstd_in F.in_buffer_pos) < chunk do
-        setf s.zstd_out F.out_buffer_size (Size_t.of_int s.out_size);
-        setf s.zstd_out F.out_buffer_pos (Size_t.of_int 0);
+      seti s.zstd_in F.in_buffer_size chunk;
+      seti s.zstd_in F.in_buffer_pos 0;
+      while geti s.zstd_in F.in_buffer_pos < chunk do
+        seti s.zstd_out F.out_buffer_size s.out_size;
+        seti s.zstd_out F.out_buffer_pos 0;
         check (F.compress_stream2 s.cctx (addr s.zstd_out) (addr s.zstd_in) T.e_continue);
-        let out_pos = Size_t.to_int (getf s.zstd_out F.out_buffer_pos) in
+        let out_pos = geti s.zstd_out F.out_buffer_pos in
         if out_pos > 0 then begin
           Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
           writer s.out_bytes 0 out_pos
@@ -276,14 +279,14 @@ let decompress_stream_read s ~reader buf off len =
         end else begin
           (* decompress one step with full output buffer *)
           let consumed_before = s.in_consumed in
-          setf s.zstd_in F.in_buffer_size (Size_t.of_int s.in_filled);
-          setf s.zstd_in F.in_buffer_pos (Size_t.of_int s.in_consumed);
-          setf s.zstd_out F.out_buffer_size (Size_t.of_int s.out_size);
-          setf s.zstd_out F.out_buffer_pos (Size_t.of_int 0);
+          seti s.zstd_in F.in_buffer_size s.in_filled;
+          seti s.zstd_in F.in_buffer_pos s.in_consumed;
+          seti s.zstd_out F.out_buffer_size s.out_size;
+          seti s.zstd_out F.out_buffer_pos 0;
           let ret = F.decompress_stream s.dctx (addr s.zstd_out) (addr s.zstd_in) in
           check ret;
-          s.in_consumed <- Size_t.to_int (getf s.zstd_in F.in_buffer_pos);
-          let produced = Size_t.to_int (getf s.zstd_out F.out_buffer_pos) in
+          s.in_consumed <- geti s.zstd_in F.in_buffer_pos;
+          let produced = geti s.zstd_out F.out_buffer_pos in
           s.last_ret <- Size_t.to_int ret;
           if produced > 0 then begin
             let n = min produced (len - !total) in
