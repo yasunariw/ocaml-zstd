@@ -151,12 +151,23 @@ let drain_output s ~writer directive =
   in
   loop ()
 
+let close_compress_on_exn s f =
+  try f () with exn ->
+    if not s.closed then begin
+      s.closed <- true;
+      if not s.freed then begin
+        s.freed <- true;
+        ignore (F.free_cctx s.cctx)
+      end
+    end;
+    raise exn
+
 let compress_stream_write s ~writer buf off len =
   if s.closed then raise (Error "stream is closed");
   if off < 0 || len < 0 || off > Bytes.length buf - len then
     invalid_arg "Zstd.compress_stream_write";
   if len = 0 then ()
-  else begin
+  else close_compress_on_exn s begin fun () ->
     let pos = ref 0 in
     while !pos < len do
       let chunk = min s.in_size (len - !pos) in
@@ -173,7 +184,7 @@ let compress_stream_write s ~writer buf off len =
 
 let compress_stream_flush s ~writer =
   if s.closed then raise (Error "stream is closed");
-  drain_output s ~writer T.e_flush
+  close_compress_on_exn s begin fun () -> drain_output s ~writer T.e_flush end
 
 let compress_stream_close s ~writer =
   if s.closed then ()
@@ -239,12 +250,23 @@ let decompress_stream_create ?dict () =
 
 let decompress_stream_is_closed s = s.closed
 
+let close_decompress_on_exn s f =
+  try f () with exn ->
+    if not s.closed then begin
+      s.closed <- true;
+      if not s.freed then begin
+        s.freed <- true;
+        ignore (F.free_dctx s.dctx)
+      end
+    end;
+    raise exn
+
 let decompress_stream_read s ~reader buf off len =
   if s.closed then raise (Error "stream is closed");
   if off < 0 || len < 0 || off > Bytes.length buf - len then
     invalid_arg "Zstd.decompress_stream_read";
   if len = 0 then 0
-  else begin
+  else close_decompress_on_exn s begin fun () ->
     let open Ctypes in
     let total = ref 0 in
     let continue = ref true in
