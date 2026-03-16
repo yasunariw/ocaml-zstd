@@ -115,6 +115,8 @@ let compress_stream_create ?level ?dict () =
     let out_buf = bigstring_create out_size in
     let out_bytes = Bytes.create out_size in
     let zstd_in, zstd_out = make_zstd_buffers in_buf out_buf in
+    (* zstd_in/zstd_out are custom blocks (Ctypes.make), freed by GC.
+       cctx is C-allocated by libzstd and must be freed explicitly. *)
     let s = { cctx; in_buf; in_size; out_buf; out_size; out_bytes;
               zstd_in; zstd_out; closed = false; freed = false } in
     Gc.finalise (fun s ->
@@ -235,6 +237,8 @@ let decompress_stream_create ?dict () =
     let in_bytes = Bytes.create in_size in
     let out_buf = bigstring_create out_size in
     let zstd_in, zstd_out = make_zstd_buffers in_buf out_buf in
+    (* zstd_in/zstd_out are custom blocks (Ctypes.make), freed by GC.
+       dctx is C-allocated by libzstd and must be freed explicitly. *)
     let s = { dctx; in_buf; in_size; in_bytes; out_buf; out_size;
               zstd_in; zstd_out; in_filled = 0; in_consumed = 0;
               out_pos = 0; out_avail = 0;
