@@ -21,15 +21,7 @@ let stream_compress ?level ?dict src =
   Zstd.Compress_stream.close s ~writer;
   Buffer.contents buf
 
-let stream_decompress ?dict ?(buf_size=Zstd.Decompress_stream.out_size ()) src =
-  let pos = ref 0 in
-  let reader b off len =
-    let available = String.length src - !pos in
-    let n = min len available in
-    Bytes.blit_string src !pos b off n;
-    pos := !pos + n;
-    n
-  in
+let stream_decompress_reader ?dict ?(buf_size=Zstd.Decompress_stream.out_size ()) ~reader () =
   let s = Zstd.Decompress_stream.create ?dict () in
   let out = Buffer.create 256 in
   let tmp = Bytes.create buf_size in
@@ -43,6 +35,17 @@ let stream_decompress ?dict ?(buf_size=Zstd.Decompress_stream.out_size ()) src =
   loop ();
   Zstd.Decompress_stream.close s;
   Buffer.contents out
+
+let string_reader src =
+  let pos = ref 0 in
+  fun b off len ->
+    let n = min len (String.length src - !pos) in
+    Bytes.blit_string src !pos b off n;
+    pos := !pos + n;
+    n
+
+let stream_decompress ?dict ?buf_size src =
+  stream_decompress_reader ?dict ?buf_size ~reader:(string_reader src) ()
 
 let test_streaming () =
   let data =
@@ -179,6 +182,34 @@ let test_streaming () =
     let compressed = stream_compress data in
     assert (stream_decompress ~buf_size:1 compressed = data);
     printf " 12. byte-at-a-time decompression: OK\n"
+  in
+  (* 13. GC stress (exercises GC safety of ctypes structs) *)
+  let () =
+    let gc_churn () =
+      ignore (Sys.opaque_identity (Array.init 100 (fun i -> String.make 64 (Char.chr (i mod 256)))));
+      Gc.compact ()
+    in
+    (* compress in 512B chunks with GC churn between each *)
+    let buf, writer = buf_writer () in
+    let s = Zstd.Compress_stream.create ~level:1 () in
+    let src = Bytes.of_string data in
+    let chunk = 512 in
+    let pos = ref 0 in
+    while !pos < String.length data do
+      let len = min chunk (String.length data - !pos) in
+      Zstd.Compress_stream.write s ~writer src !pos len;
+      gc_churn ();
+      pos := !pos + len
+    done;
+    Zstd.Compress_stream.close s ~writer;
+    (* decompress with small buf_size: many read+decompress calls *)
+    let compressed = Buffer.contents buf in
+    let reader =
+      let r = string_reader compressed in
+      fun b off len -> let n = r b off len in gc_churn (); n
+    in
+    assert (stream_decompress_reader ~buf_size:512 ~reader () = data);
+    printf " 13. GC stress: OK\n"
   in
   printf "All streaming tests passed.\n"
 
