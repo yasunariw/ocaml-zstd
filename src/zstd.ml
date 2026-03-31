@@ -83,6 +83,7 @@ let make_zstd_buffers in_buf out_buf =
 module Compress_stream = struct
   type t = {
     cctx: [`CCtx] Ctypes.structure Ctypes.ptr;
+    writer: bytes -> int -> int -> unit;
     in_buf: bigstring;
     in_size: int;
     out_buf: bigstring;
@@ -96,7 +97,7 @@ module Compress_stream = struct
   let in_size () = Size_t.to_int (F.cstream_in_size ())
   let out_size () = Size_t.to_int (F.cstream_out_size ())
 
-  let create ?level ?dict () =
+  let create ?level ?dict ~writer () =
     let open Ctypes in
     let cctx = F.create_cctx () in
     if is_null cctx then raise (Error "ZSTD_createCCtx failed");
@@ -115,7 +116,7 @@ module Compress_stream = struct
       let zstd_in, zstd_out = make_zstd_buffers in_buf out_buf in
       (* zstd_in/zstd_out are custom blocks (Ctypes.make), freed by GC.
          cctx is C-allocated by libzstd and must be freed explicitly. *)
-      let s = { cctx; in_buf; in_size; out_buf; out_size; out_bytes;
+      let s = { cctx; writer; in_buf; in_size; out_buf; out_size; out_bytes;
                 zstd_in; zstd_out; closed = false } in
       Gc.finalise (fun s ->
         if not s.closed then begin
@@ -130,7 +131,7 @@ module Compress_stream = struct
 
   let is_closed s = s.closed
 
-  let compress_step s ~writer directive =
+  let compress_step s directive =
     let open Ctypes in
     seti s.zstd_out F.out_buffer_size s.out_size;
     seti s.zstd_out F.out_buffer_pos 0;
@@ -139,14 +140,14 @@ module Compress_stream = struct
     let out_pos = geti s.zstd_out F.out_buffer_pos in
     if out_pos > 0 then begin
       Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
-      writer s.out_bytes 0 out_pos
+      s.writer s.out_bytes 0 out_pos
     end;
     Size_t.to_int remaining
 
-  let drain_output s ~writer directive =
+  let drain_output s directive =
     seti s.zstd_in F.in_buffer_size 0;
     seti s.zstd_in F.in_buffer_pos 0;
-    while 0 < compress_step s ~writer directive do () done
+    while 0 < compress_step s directive do () done
 
   let close_on_exn s f =
     try f () with exn ->
@@ -156,7 +157,7 @@ module Compress_stream = struct
       end;
       raise exn
 
-  let write s ~writer buf off len =
+  let write s buf off len =
     if s.closed then raise (Error "stream is closed");
     if off < 0 || len < 0 || off > Bytes.length buf - len then
       invalid_arg "Zstd.Compress_stream.write";
@@ -169,30 +170,31 @@ module Compress_stream = struct
         seti s.zstd_in F.in_buffer_size chunk;
         seti s.zstd_in F.in_buffer_pos 0;
         while geti s.zstd_in F.in_buffer_pos < chunk do
-          let (_remaining : int) = compress_step s ~writer T.e_continue in
+          let (_remaining : int) = compress_step s T.e_continue in
           ()
         done;
         pos := !pos + chunk
       done
     end
 
-  let flush s ~writer =
+  let flush s =
     if s.closed then raise (Error "stream is closed");
-    close_on_exn s begin fun () -> drain_output s ~writer T.e_flush end
+    close_on_exn s begin fun () -> drain_output s T.e_flush end
 
-  let close s ~writer =
+  let close s =
     if s.closed then ()
     else begin
       s.closed <- true;
       Fun.protect
         ~finally:(fun () -> ignore (F.free_cctx s.cctx))
-        (fun () -> drain_output s ~writer T.e_end)
+        (fun () -> drain_output s T.e_end)
     end
 end
 
 module Decompress_stream = struct
   type t = {
     dctx: [`DCtx] Ctypes.structure Ctypes.ptr;
+    reader: bytes -> int -> int -> int;
     in_buf: bigstring;
     in_size: int;
     in_bytes: bytes;
@@ -212,7 +214,7 @@ module Decompress_stream = struct
   let in_size () = Size_t.to_int (F.dstream_in_size ())
   let out_size () = Size_t.to_int (F.dstream_out_size ())
 
-  let create ?dict () =
+  let create ?dict ~reader () =
     let open Ctypes in
     let dctx = F.create_dctx () in
     if is_null dctx then raise (Error "ZSTD_createDCtx failed");
@@ -228,7 +230,7 @@ module Decompress_stream = struct
       let zstd_in, zstd_out = make_zstd_buffers in_buf out_buf in
       (* zstd_in/zstd_out are custom blocks (Ctypes.make), freed by GC.
          dctx is C-allocated by libzstd and must be freed explicitly. *)
-      let s = { dctx; in_buf; in_size; in_bytes; out_buf; out_size;
+      let s = { dctx; reader; in_buf; in_size; in_bytes; out_buf; out_size;
                 zstd_in; zstd_out; in_filled = 0; in_consumed = 0;
                 out_pos = 0; out_avail = 0;
                 eof = false; last_ret = 0; closed = false } in
@@ -253,7 +255,7 @@ module Decompress_stream = struct
       end;
       raise exn
 
-  let read s ~reader buf off len =
+  let read s buf off len =
     if s.closed then raise (Error "stream is closed");
     if off < 0 || len < 0 || off > Bytes.length buf - len then
       invalid_arg "Zstd.Decompress_stream.read";
@@ -273,7 +275,7 @@ module Decompress_stream = struct
         end else begin
           (* refill input buffer if exhausted *)
           if s.in_consumed >= s.in_filled && not s.eof then begin
-            let n = reader s.in_bytes 0 s.in_size in
+            let n = s.reader s.in_bytes 0 s.in_size in
             if n < 0 || n > s.in_size then
               invalid_arg "Zstd.Decompress_stream.read: reader returned invalid length";
             if n = 0 then
