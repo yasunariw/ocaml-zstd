@@ -119,7 +119,7 @@ module Compress_stream = struct
                 zstd_in; zstd_out; closed = false } in
       Gc.finalise (fun s ->
         if not s.closed then begin
-          prerr_endline "W: Zstd.Compress_stream was not explicitly closed";
+          prerr_endline "W: closing Zstd.Compress_stream in GC finalizer, this is likely benign but could indicate a bug in the program using ocaml-zstd library";
           s.closed <- true;
           ignore (F.free_cctx s.cctx)
         end) s;
@@ -234,7 +234,7 @@ module Decompress_stream = struct
                 eof = false; last_ret = 0; closed = false } in
       Gc.finalise (fun s ->
         if not s.closed then begin
-          prerr_endline "W: Zstd.Decompress_stream was not explicitly closed";
+          prerr_endline "W: closing Zstd.Decompress_stream in GC finalizer, this is likely benign but could indicate a bug in the program using ocaml-zstd library";
           s.closed <- true;
           ignore (F.free_dctx s.dctx)
         end) s;
