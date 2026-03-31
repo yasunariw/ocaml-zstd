@@ -91,7 +91,6 @@ module Compress_stream = struct
     zstd_in: [`InBuffer] Ctypes.structure;
     zstd_out: [`OutBuffer] Ctypes.structure;
     mutable closed: bool;
-    mutable freed: bool;
   }
 
   let in_size () = Size_t.to_int (F.cstream_in_size ())
@@ -117,11 +116,11 @@ module Compress_stream = struct
       (* zstd_in/zstd_out are custom blocks (Ctypes.make), freed by GC.
          cctx is C-allocated by libzstd and must be freed explicitly. *)
       let s = { cctx; in_buf; in_size; out_buf; out_size; out_bytes;
-                zstd_in; zstd_out; closed = false; freed = false } in
+                zstd_in; zstd_out; closed = false } in
       Gc.finalise (fun s ->
-        if not s.freed then begin
+        if not s.closed then begin
           prerr_endline "W: Zstd.Compress_stream was not explicitly closed";
-          s.freed <- true;
+          s.closed <- true;
           ignore (F.free_cctx s.cctx)
         end) s;
       s
@@ -157,10 +156,7 @@ module Compress_stream = struct
     try f () with exn ->
       if not s.closed then begin
         s.closed <- true;
-        if not s.freed then begin
-          s.freed <- true;
-          ignore (F.free_cctx s.cctx)
-        end
+        ignore (F.free_cctx s.cctx)
       end;
       raise exn
 
@@ -193,11 +189,7 @@ module Compress_stream = struct
     else begin
       s.closed <- true;
       Fun.protect
-        ~finally:(fun () ->
-          if not s.freed then begin
-            s.freed <- true;
-            ignore (F.free_cctx s.cctx)
-          end)
+        ~finally:(fun () -> ignore (F.free_cctx s.cctx))
         (fun () -> drain_output s ~writer T.e_end)
     end
 end
@@ -219,7 +211,6 @@ module Decompress_stream = struct
     mutable eof: bool;
     mutable last_ret: int;
     mutable closed: bool;
-    mutable freed: bool;
   }
 
   let in_size () = Size_t.to_int (F.dstream_in_size ())
@@ -244,11 +235,11 @@ module Decompress_stream = struct
       let s = { dctx; in_buf; in_size; in_bytes; out_buf; out_size;
                 zstd_in; zstd_out; in_filled = 0; in_consumed = 0;
                 out_pos = 0; out_avail = 0;
-                eof = false; last_ret = 0; closed = false; freed = false } in
+                eof = false; last_ret = 0; closed = false } in
       Gc.finalise (fun s ->
-        if not s.freed then begin
+        if not s.closed then begin
           prerr_endline "W: Zstd.Decompress_stream was not explicitly closed";
-          s.freed <- true;
+          s.closed <- true;
           ignore (F.free_dctx s.dctx)
         end) s;
       s
@@ -262,10 +253,7 @@ module Decompress_stream = struct
     try f () with exn ->
       if not s.closed then begin
         s.closed <- true;
-        if not s.freed then begin
-          s.freed <- true;
-          ignore (F.free_dctx s.dctx)
-        end
+        ignore (F.free_dctx s.dctx)
       end;
       raise exn
 
@@ -337,9 +325,6 @@ module Decompress_stream = struct
     if s.closed then ()
     else begin
       s.closed <- true;
-      if not s.freed then begin
-        s.freed <- true;
-        ignore (F.free_dctx s.dctx)
-      end
+      ignore (F.free_dctx s.dctx)
     end
 end
