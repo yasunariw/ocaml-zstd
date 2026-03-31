@@ -146,11 +146,7 @@ module Compress_stream = struct
   let drain_output s ~writer directive =
     seti s.zstd_in F.in_buffer_size 0;
     seti s.zstd_in F.in_buffer_pos 0;
-    let rec loop () =
-      let remaining = compress_step s ~writer directive in
-      if remaining > 0 then loop ()
-    in
-    loop ()
+    while 0 < compress_step s ~writer directive do () done
 
   let close_on_exn s f =
     try f () with exn ->
