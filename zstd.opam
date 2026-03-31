@@ -17,6 +17,7 @@ build: [
 depends: [
   "ocaml"
   "dune" {>= "3.7"}
+  "bigarray-compat"
   "bigstringaf"
   "ctypes" {>= "0.13.0"}
   "integers"
