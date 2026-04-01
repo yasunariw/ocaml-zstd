@@ -32,4 +32,33 @@ module Functions (F : Cstubs.FOREIGN) = struct
 
   let decompress_using_dict = foreign "ZSTD_decompress_usingDict" (ptr dctx @-> ptr void @-> size_t @-> string @-> size_t @->
     string @-> size_t @-> returning size_t)
+
+  let in_buffer : [`InBuffer] structure typ = structure "ZSTD_inBuffer_s"
+  let in_buffer_src = field in_buffer "src" (ptr void)
+  let in_buffer_size = field in_buffer "size" size_t
+  let in_buffer_pos = field in_buffer "pos" size_t
+  let () = seal in_buffer
+
+  let out_buffer : [`OutBuffer] structure typ = structure "ZSTD_outBuffer_s"
+  let out_buffer_dst = field out_buffer "dst" (ptr void)
+  let out_buffer_size = field out_buffer "size" size_t
+  let out_buffer_pos = field out_buffer "pos" size_t
+  let () = seal out_buffer
+
+  let cstream_in_size = foreign "ZSTD_CStreamInSize" (void @-> returning size_t)
+  let cstream_out_size = foreign "ZSTD_CStreamOutSize" (void @-> returning size_t)
+  let dstream_in_size = foreign "ZSTD_DStreamInSize" (void @-> returning size_t)
+  let dstream_out_size = foreign "ZSTD_DStreamOutSize" (void @-> returning size_t)
+
+  let compress_stream2 = foreign "ZSTD_compressStream2"
+    (ptr cctx @-> ptr out_buffer @-> ptr in_buffer @-> int @-> returning size_t)
+  let decompress_stream = foreign "ZSTD_decompressStream"
+    (ptr dctx @-> ptr out_buffer @-> ptr in_buffer @-> returning size_t)
+
+  let cctx_set_parameter = foreign "ZSTD_CCtx_setParameter"
+    (ptr cctx @-> int @-> int @-> returning size_t)
+  let cctx_load_dictionary = foreign "ZSTD_CCtx_loadDictionary"
+    (ptr cctx @-> string @-> size_t @-> returning size_t)
+  let dctx_load_dictionary = foreign "ZSTD_DCtx_loadDictionary"
+    (ptr dctx @-> string @-> size_t @-> returning size_t)
 end
