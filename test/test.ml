@@ -212,6 +212,203 @@ let test_streaming () =
     assert (stream_decompress_reader ~buf_size:512 ~reader () = data);
     printf " 13. GC stress: OK\n"
   in
+  (* Bigstring helpers reused by tests 14, 16, 19, 21. *)
+  let bs_buf_writer () =
+    let buf = Buffer.create 256 in
+    buf, (fun ba ~off ~len -> Buffer.add_string buf (Bigstringaf.substring ba ~off ~len))
+  in
+  let bs_string_reader src =
+    let pos = ref 0 in
+    fun ba ~off ~len ->
+      let n = min len (String.length src - !pos) in
+      Bigstringaf.blit_from_string src ~src_off:!pos ba ~dst_off:off ~len:n;
+      pos := !pos + n;
+      n
+  in
+  let stream_decompress_bs ?(buf_size=Zstd.Decompress_stream.out_size ()) src =
+    let ds = Zstd.Decompress_stream.create_bigstring ~reader:(bs_string_reader src) () in
+    let out = Buffer.create 256 in
+    let tmp = Bigstringaf.create buf_size in
+    let rec loop () =
+      let n = Zstd.Decompress_stream.read_bigstring ds tmp ~off:0 ~len:buf_size in
+      if n > 0 then begin
+        Buffer.add_string out (Bigstringaf.substring tmp ~off:0 ~len:n);
+        loop ()
+      end
+    in
+    loop ();
+    Zstd.Decompress_stream.close ds;
+    Buffer.contents out
+  in
+  (* 14. Bigstring round-trip *)
+  let () =
+    let buf, writer = bs_buf_writer () in
+    let s = Zstd.Compress_stream.create_bigstring ~writer () in
+    let src_ba = Bigstringaf.of_string ~off:0 ~len:(String.length data) data in
+    Zstd.Compress_stream.write_bigstring s src_ba ~off:0 ~len:(String.length data);
+    Zstd.Compress_stream.close s;
+    let decompressed = stream_decompress_bs (Buffer.contents buf) in
+    assert (decompressed = data);
+    printf " 14. bigstring round-trip: OK\n"
+  in
+  (* 15. Mixed sinks on Compress: write + write_bigstring on a bigstring-sink stream *)
+  let () =
+    let buf, writer = bs_buf_writer () in
+    let s = Zstd.Compress_stream.create_bigstring ~level:1 ~writer () in
+    let data_ba = Bigstringaf.of_string ~off:0 ~len:(String.length data) data in
+    let data_b = Bytes.of_string data in
+    let n = String.length data in
+    let half = n / 2 in
+    Zstd.Compress_stream.write s data_b 0 half;
+    Zstd.Compress_stream.write_bigstring s data_ba ~off:half ~len:(n - half);
+    Zstd.Compress_stream.close s;
+    let decompressed = stream_decompress (Buffer.contents buf) in
+    assert (decompressed = data);
+    printf " 15. mixed sinks on Compress: OK\n"
+  in
+  (* 16. Mixed sinks on Decompress: read + read_bigstring on a bigstring-source stream *)
+  let () =
+    let compressed = stream_compress data in
+    let ds = Zstd.Decompress_stream.create_bigstring ~reader:(bs_string_reader compressed) () in
+    let out = Buffer.create 256 in
+    let tmp_b = Bytes.create 100 in
+    let tmp_ba = Bigstringaf.create 100 in
+    let alt = ref false in
+    let continue = ref true in
+    while !continue do
+      let n =
+        if !alt then Zstd.Decompress_stream.read ds tmp_b 0 100
+        else Zstd.Decompress_stream.read_bigstring ds tmp_ba ~off:0 ~len:100
+      in
+      if n = 0 then continue := false
+      else begin
+        if !alt then Buffer.add_subbytes out tmp_b 0 n
+        else Buffer.add_string out (Bigstringaf.substring tmp_ba ~off:0 ~len:n);
+        alt := not !alt
+      end
+    done;
+    Zstd.Decompress_stream.close ds;
+    assert (Buffer.contents out = data);
+    printf " 16. mixed sinks on Decompress: OK\n"
+  in
+  (* 17. write_bigstring offset: ensure only the [off..off+len) slice is compressed *)
+  let () =
+    let payload = "Hello, zstd bigstring world!" in
+    let pad = 50 in
+    let total = pad + String.length payload + pad in
+    let ba = Bigstringaf.create total in
+    for i = 0 to total - 1 do Bigstringaf.set ba i '\xff' done;
+    Bigstringaf.blit_from_string payload ~src_off:0 ba ~dst_off:pad ~len:(String.length payload);
+    let buf, writer = bs_buf_writer () in
+    let s = Zstd.Compress_stream.create_bigstring ~writer () in
+    Zstd.Compress_stream.write_bigstring s ba ~off:pad ~len:(String.length payload);
+    Zstd.Compress_stream.close s;
+    assert (stream_decompress (Buffer.contents buf) = payload);
+    printf " 17. write_bigstring offset: OK\n"
+  in
+  (* 18. read_bigstring offset: write into middle of larger bigstring, sentinel head/tail *)
+  let () =
+    let payload = "Hello, zstd bigstring world!" in
+    let compressed = stream_compress payload in
+    let pad = 50 in
+    let total = pad + String.length payload + pad in
+    let ba = Bigstringaf.create total in
+    for i = 0 to total - 1 do Bigstringaf.set ba i 'Z' done;
+    let ds = Zstd.Decompress_stream.create ~reader:(string_reader compressed) () in
+    let got = ref 0 in
+    let continue = ref true in
+    while !continue do
+      let want = String.length payload - !got in
+      if want = 0 then continue := false
+      else begin
+        let n = Zstd.Decompress_stream.read_bigstring ds ba ~off:(pad + !got) ~len:want in
+        if n = 0 then continue := false else got := !got + n
+      end
+    done;
+    Zstd.Decompress_stream.close ds;
+    assert (!got = String.length payload);
+    for i = 0 to pad - 1 do assert (Bigstringaf.get ba i = 'Z') done;
+    for i = pad + String.length payload to total - 1 do assert (Bigstringaf.get ba i = 'Z') done;
+    assert (Bigstringaf.substring ba ~off:pad ~len:(String.length payload) = payload);
+    printf " 18. read_bigstring offset: OK\n"
+  in
+  (* 19. Byte-at-a-time bigstring (stresses src/dst restoration between tiny chunks) *)
+  let () =
+    let buf, writer = bs_buf_writer () in
+    let s = Zstd.Compress_stream.create_bigstring ~level:1 ~writer () in
+    let src_ba = Bigstringaf.of_string ~off:0 ~len:(String.length data) data in
+    for i = 0 to String.length data - 1 do
+      Zstd.Compress_stream.write_bigstring s src_ba ~off:i ~len:1
+    done;
+    Zstd.Compress_stream.close s;
+    assert (stream_decompress_bs ~buf_size:1 (Buffer.contents buf) = data);
+    printf " 19. byte-at-a-time bigstring: OK\n"
+  in
+  (* 20. Bigstring input validation *)
+  let () =
+    let in_size = Zstd.Decompress_stream.in_size () in
+    let ba = Bigstringaf.create 64 in
+    let noop_writer _ ~off:_ ~len:_ = () in
+    let with_compress f =
+      expect_exn (fun () ->
+        let s = Zstd.Compress_stream.create_bigstring ~writer:noop_writer () in
+        Fun.protect ~finally:(fun () -> Zstd.Compress_stream.close s) (fun () -> f s))
+    in
+    with_compress (fun s -> Zstd.Compress_stream.write_bigstring s ba ~off:(-1) ~len:1);
+    with_compress (fun s -> Zstd.Compress_stream.write_bigstring s ba ~off:0 ~len:(-1));
+    with_compress (fun s -> Zstd.Compress_stream.write_bigstring s ba ~off:max_int ~len:1);
+    let with_decompress reader f =
+      expect_exn (fun () ->
+        let ds = Zstd.Decompress_stream.create_bigstring ~reader () in
+        Fun.protect ~finally:(fun () -> Zstd.Decompress_stream.close ds) (fun () -> f ds))
+    in
+    let ok_reader _ ~off:_ ~len:_ = 0 in
+    let bad_neg _ ~off:_ ~len:_ = -1 in
+    let bad_big _ ~off:_ ~len:_ = in_size + 1 in
+    with_decompress ok_reader (fun ds ->
+      Zstd.Decompress_stream.read_bigstring ds ba ~off:max_int ~len:1);
+    with_decompress bad_neg (fun ds ->
+      Zstd.Decompress_stream.read_bigstring ds ba ~off:0 ~len:64);
+    with_decompress bad_big (fun ds ->
+      Zstd.Decompress_stream.read_bigstring ds ba ~off:0 ~len:64);
+    printf " 20. bigstring input validation: OK\n"
+  in
+  (* 21. Bigstring GC stress (verifies src/dst manipulation survives Gc.compact) *)
+  let () =
+    let gc_churn () =
+      ignore (Sys.opaque_identity (Array.init 100 (fun i -> String.make 64 (Char.chr (i mod 256)))));
+      Gc.compact ()
+    in
+    let buf, writer = bs_buf_writer () in
+    let s = Zstd.Compress_stream.create_bigstring ~level:1 ~writer () in
+    let src_ba = Bigstringaf.of_string ~off:0 ~len:(String.length data) data in
+    let chunk = 512 in
+    let pos = ref 0 in
+    while !pos < String.length data do
+      let len = min chunk (String.length data - !pos) in
+      Zstd.Compress_stream.write_bigstring s src_ba ~off:!pos ~len;
+      gc_churn ();
+      pos := !pos + len
+    done;
+    Zstd.Compress_stream.close s;
+    let compressed = Buffer.contents buf in
+    let reader =
+      let r = bs_string_reader compressed in
+      fun ba ~off ~len -> let n = r ba ~off ~len in gc_churn (); n
+    in
+    let ds = Zstd.Decompress_stream.create_bigstring ~reader () in
+    let out = Buffer.create 256 in
+    let tmp = Bigstringaf.create 512 in
+    let continue = ref true in
+    while !continue do
+      let n = Zstd.Decompress_stream.read_bigstring ds tmp ~off:0 ~len:512 in
+      if n = 0 then continue := false
+      else Buffer.add_string out (Bigstringaf.substring tmp ~off:0 ~len:n)
+    done;
+    Zstd.Decompress_stream.close ds;
+    assert (Buffer.contents out = data);
+    printf " 21. bigstring GC stress: OK\n"
+  in
   printf "All streaming tests passed.\n"
 
 let () =

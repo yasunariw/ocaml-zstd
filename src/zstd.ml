@@ -81,14 +81,17 @@ let make_zstd_buffers in_buf out_buf =
   (zstd_in, zstd_out)
 
 module Compress_stream = struct
+  type writer =
+    | Bytes_writer of (bytes -> int -> int -> unit) * bytes
+    | Bigstring_writer of (bigstring -> off:int -> len:int -> unit)
+
   type t = {
     cctx: [`CCtx] Ctypes.structure Ctypes.ptr;
-    writer: bytes -> int -> int -> unit;
+    sink: writer;
     in_buf: bigstring;
     in_size: int;
     out_buf: bigstring;
     out_size: int;
-    out_bytes: bytes;
     zstd_in: [`InBuffer] Ctypes.structure;
     zstd_out: [`OutBuffer] Ctypes.structure;
     mutable closed: bool;
@@ -97,7 +100,7 @@ module Compress_stream = struct
   let in_size () = Size_t.to_int (F.cstream_in_size ())
   let out_size () = Size_t.to_int (F.cstream_out_size ())
 
-  let create ?level ?dict ~writer () =
+  let make ?level ?dict sink =
     let open Ctypes in
     let cctx = F.create_cctx () in
     if is_null cctx then raise (Error "ZSTD_createCCtx failed");
@@ -112,11 +115,10 @@ module Compress_stream = struct
       let out_size = out_size () in
       let in_buf = bigstring_create in_size in
       let out_buf = bigstring_create out_size in
-      let out_bytes = Bytes.create out_size in
       let zstd_in, zstd_out = make_zstd_buffers in_buf out_buf in
       (* zstd_in/zstd_out are custom blocks (Ctypes.make), freed by GC.
          cctx is C-allocated by libzstd and must be freed explicitly. *)
-      let s = { cctx; writer; in_buf; in_size; out_buf; out_size; out_bytes;
+      let s = { cctx; sink; in_buf; in_size; out_buf; out_size;
                 zstd_in; zstd_out; closed = false } in
       Gc.finalise (fun s ->
         if not s.closed then begin
@@ -129,7 +131,22 @@ module Compress_stream = struct
       ignore (F.free_cctx cctx);
       raise exn
 
+  let create ?level ?dict ~writer () =
+    make ?level ?dict (Bytes_writer (writer, Bytes.create (out_size ())))
+
+  let create_bigstring ?level ?dict ~writer () =
+    make ?level ?dict (Bigstring_writer writer)
+
   let is_closed s = s.closed
+
+  let emit_output s out_pos =
+    if out_pos > 0 then
+      match s.sink with
+      | Bytes_writer (writer, out_bytes) ->
+        Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 out_bytes ~dst_off:0 ~len:out_pos;
+        writer out_bytes 0 out_pos
+      | Bigstring_writer writer ->
+        writer s.out_buf ~off:0 ~len:out_pos
 
   let compress_step s directive =
     let open Ctypes in
@@ -137,11 +154,7 @@ module Compress_stream = struct
     seti s.zstd_out F.out_buffer_pos 0;
     let remaining = F.compress_stream2 s.cctx (addr s.zstd_out) (addr s.zstd_in) directive in
     check remaining;
-    let out_pos = geti s.zstd_out F.out_buffer_pos in
-    if out_pos > 0 then begin
-      Bigstringaf.blit_to_bytes s.out_buf ~src_off:0 s.out_bytes ~dst_off:0 ~len:out_pos;
-      s.writer s.out_bytes 0 out_pos
-    end;
+    emit_output s (geti s.zstd_out F.out_buffer_pos);
     Size_t.to_int remaining
 
   let drain_output s directive =
@@ -177,6 +190,26 @@ module Compress_stream = struct
       done
     end
 
+  let write_bigstring s buf ~off ~len =
+    if s.closed then raise (Error "stream is closed");
+    if off < 0 || len < 0 || off > Bigstringaf.length buf - len then
+      invalid_arg "Zstd.Compress_stream.write_bigstring";
+    if len = 0 then ()
+    else close_on_exn s begin fun () ->
+      let open Ctypes in
+      Fun.protect
+        ~finally:(fun () ->
+          setf s.zstd_in F.in_buffer_src (to_voidp (bigstring_start s.in_buf)))
+        (fun () ->
+          setf s.zstd_in F.in_buffer_src (to_voidp (bigarray_start array1 buf +@ off));
+          seti s.zstd_in F.in_buffer_size len;
+          seti s.zstd_in F.in_buffer_pos 0;
+          while geti s.zstd_in F.in_buffer_pos < len do
+            let (_remaining : int) = compress_step s T.e_continue in
+            ()
+          done)
+    end
+
   let flush s =
     if s.closed then raise (Error "stream is closed");
     close_on_exn s begin fun () -> drain_output s T.e_flush end
@@ -192,12 +225,15 @@ module Compress_stream = struct
 end
 
 module Decompress_stream = struct
+  type reader =
+    | Bytes_reader of (bytes -> int -> int -> int) * bytes
+    | Bigstring_reader of (bigstring -> off:int -> len:int -> int)
+
   type t = {
     dctx: [`DCtx] Ctypes.structure Ctypes.ptr;
-    reader: bytes -> int -> int -> int;
+    source: reader;
     in_buf: bigstring;
     in_size: int;
-    in_bytes: bytes;
     out_buf: bigstring;
     out_size: int;
     zstd_in: [`InBuffer] Ctypes.structure;
@@ -214,7 +250,7 @@ module Decompress_stream = struct
   let in_size () = Size_t.to_int (F.dstream_in_size ())
   let out_size () = Size_t.to_int (F.dstream_out_size ())
 
-  let create ?dict ~reader () =
+  let make ?dict source =
     let open Ctypes in
     let dctx = F.create_dctx () in
     if is_null dctx then raise (Error "ZSTD_createDCtx failed");
@@ -225,12 +261,11 @@ module Decompress_stream = struct
       let in_size = in_size () in
       let out_size = out_size () in
       let in_buf = bigstring_create in_size in
-      let in_bytes = Bytes.create in_size in
       let out_buf = bigstring_create out_size in
       let zstd_in, zstd_out = make_zstd_buffers in_buf out_buf in
       (* zstd_in/zstd_out are custom blocks (Ctypes.make), freed by GC.
          dctx is C-allocated by libzstd and must be freed explicitly. *)
-      let s = { dctx; reader; in_buf; in_size; in_bytes; out_buf; out_size;
+      let s = { dctx; source; in_buf; in_size; out_buf; out_size;
                 zstd_in; zstd_out; in_filled = 0; in_consumed = 0;
                 out_pos = 0; out_avail = 0;
                 eof = false; last_ret = 0; closed = false } in
@@ -245,6 +280,12 @@ module Decompress_stream = struct
       ignore (F.free_dctx dctx);
       raise exn
 
+  let create ?dict ~reader () =
+    make ?dict (Bytes_reader (reader, Bytes.create (in_size ())))
+
+  let create_bigstring ?dict ~reader () =
+    make ?dict (Bigstring_reader reader)
+
   let is_closed s = s.closed
 
   let close_on_exn s f =
@@ -254,6 +295,27 @@ module Decompress_stream = struct
         ignore (F.free_dctx s.dctx)
       end;
       raise exn
+
+  let refill_input s =
+    if s.in_consumed >= s.in_filled && not s.eof then begin
+      let n =
+        match s.source with
+        | Bytes_reader (reader, in_bytes) ->
+          let n = reader in_bytes 0 s.in_size in
+          if n < 0 || n > s.in_size then
+            invalid_arg "Zstd.Decompress_stream.read: reader returned invalid length";
+          if n > 0 then
+            Bigstringaf.blit_from_bytes in_bytes ~src_off:0 s.in_buf ~dst_off:0 ~len:n;
+          n
+        | Bigstring_reader reader ->
+          let n = reader s.in_buf ~off:0 ~len:s.in_size in
+          if n < 0 || n > s.in_size then
+            invalid_arg "Zstd.Decompress_stream.read_bigstring: reader returned invalid length";
+          n
+      in
+      if n = 0 then s.eof <- true
+      else begin s.in_filled <- n; s.in_consumed <- 0 end
+    end
 
   let read s buf off len =
     if s.closed then raise (Error "stream is closed");
@@ -273,19 +335,7 @@ module Decompress_stream = struct
           s.out_avail <- s.out_avail - n;
           total := !total + n
         end else begin
-          (* refill input buffer if exhausted *)
-          if s.in_consumed >= s.in_filled && not s.eof then begin
-            let n = s.reader s.in_bytes 0 s.in_size in
-            if n < 0 || n > s.in_size then
-              invalid_arg "Zstd.Decompress_stream.read: reader returned invalid length";
-            if n = 0 then
-              s.eof <- true
-            else begin
-              Bigstringaf.blit_from_bytes s.in_bytes ~src_off:0 s.in_buf ~dst_off:0 ~len:n;
-              s.in_filled <- n;
-              s.in_consumed <- 0
-            end
-          end;
+          refill_input s;
           (* detect clean EOF vs truncation *)
           if s.in_consumed >= s.in_filled && s.eof then begin
             if s.last_ret <> 0 then
@@ -317,6 +367,54 @@ module Decompress_stream = struct
         end
       done;
       !total
+    end
+
+  let read_bigstring s buf ~off ~len =
+    if s.closed then raise (Error "stream is closed");
+    if off < 0 || len < 0 || off > Bigstringaf.length buf - len then
+      invalid_arg "Zstd.Decompress_stream.read_bigstring";
+    if len = 0 then 0
+    else close_on_exn s begin fun () ->
+      let open Ctypes in
+      Fun.protect
+        ~finally:(fun () ->
+          setf s.zstd_out F.out_buffer_dst (to_voidp (bigstring_start s.out_buf)))
+        (fun () ->
+          let total = ref 0 in
+          let continue = ref true in
+          while !total < len && !continue do
+            if s.out_avail > 0 then begin
+              let n = min s.out_avail (len - !total) in
+              Bigstringaf.blit s.out_buf ~src_off:s.out_pos buf ~dst_off:(off + !total) ~len:n;
+              s.out_pos <- s.out_pos + n;
+              s.out_avail <- s.out_avail - n;
+              total := !total + n
+            end else begin
+              refill_input s;
+              if s.in_consumed >= s.in_filled && s.eof then begin
+                if s.last_ret <> 0 then
+                  raise (Error "truncated compressed data");
+                continue := false
+              end else begin
+                setf s.zstd_out F.out_buffer_dst
+                  (to_voidp (bigarray_start array1 buf +@ (off + !total)));
+                let consumed_before = s.in_consumed in
+                seti s.zstd_in F.in_buffer_size s.in_filled;
+                seti s.zstd_in F.in_buffer_pos s.in_consumed;
+                seti s.zstd_out F.out_buffer_size (len - !total);
+                seti s.zstd_out F.out_buffer_pos 0;
+                let ret = F.decompress_stream s.dctx (addr s.zstd_out) (addr s.zstd_in) in
+                check ret;
+                s.in_consumed <- geti s.zstd_in F.in_buffer_pos;
+                let produced = geti s.zstd_out F.out_buffer_pos in
+                s.last_ret <- Size_t.to_int ret;
+                total := !total + produced;
+                if produced = 0 && s.in_consumed = consumed_before && s.last_ret <> 0 then
+                  raise (Error "decompression made no progress")
+              end
+            end
+          done;
+          !total)
     end
 
   let close s =
